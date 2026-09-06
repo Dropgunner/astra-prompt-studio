@@ -71,3 +71,6 @@ Use an aperture-like double ring with a vermilion calibration notch: an abstract
 - Maintain a paper-like light interface; avoid dark mode, gradients, and generic rounded dashboard cards.
 - Put a concrete economy rationale beside each automated edit.
 - Reserve vermilion for active decisions, proofing changes, and primary actions only.
+- Use dark surfaces solely as compact diagnostic instrument insets; the workbench itself remains paper-led.
+- Render visible prose as finished editorial copy, never as raw Markdown syntax.
+- Carry measurement labels, rule lines, and proofing annotations through each lower-page audit checkpoint.

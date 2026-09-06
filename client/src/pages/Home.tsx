@@ -5,11 +5,15 @@
 import { useMemo, useState } from "react";
 import {
   ArrowUpRight,
+  CircleDollarSign,
   Check,
   CheckCircle2,
   ChevronRight,
   ClipboardCheck,
   Copy,
+  Download,
+  FileJson,
+  FileText,
   Gauge,
   Layers3,
   Lightbulb,
@@ -19,10 +23,12 @@ import {
   Target,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ASTRA_PRICING, estimateAstraCost, formatUsd, type ServiceTier } from "@/lib/costing";
 
 type Mode = "quick" | "workflow" | "agent";
 type Autonomy = "continue" | "ask-material" | "ask-first";
 type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+const OUTPUT_TOKEN_OPTIONS = [300, 800, 1600, 3200, 6400, 12800];
 
 const modes: { id: Mode; label: string; detail: string }[] = [
   { id: "quick", label: "Lean task", detail: "Writing, transformation, analysis" },
@@ -87,6 +93,9 @@ export default function Home() {
   const [includeStop, setIncludeStop] = useState(true);
   const [includeDelegation, setIncludeDelegation] = useState(false);
   const [compiledAt, setCompiledAt] = useState(0);
+  const [expectedOutputTokens, setExpectedOutputTokens] = useState(800);
+  const [cacheReadShare, setCacheReadShare] = useState(0);
+  const [serviceTier, setServiceTier] = useState<ServiceTier>("standard");
 
   const compiledPrompt = useMemo(() => {
     const blocks = [
@@ -141,14 +150,98 @@ export default function Home() {
 
   const inputWords = wordCount([goal, context, requirements, output].join(" "));
   const compiledWords = wordCount(compiledPrompt);
-  const estimatedTokens = Math.ceil(compiledWords * 1.35);
+  const estimatedInputTokens = Math.ceil(compiledWords * 1.35);
   const leverage = Math.min(98, Math.max(48, 52 + (goal ? 8 : 0) + (context ? 8 : 0) + (requirements ? 8 : 0) + (output ? 8 : 0) + (mode !== "quick" ? 8 : 0) + (includeVerification ? 5 : 0) + (includeStop ? 3 : 0)));
   const overhead = Math.max(0, compiledWords - inputWords);
   const activeControls = [mode !== "quick", includeTools && mode === "agent", includeVerification && mode !== "quick", includeStop && mode !== "quick", includeDelegation && mode === "agent"].filter(Boolean).length;
+  const cacheWriteTokens = cacheReadShare > 0 ? Math.round(estimatedInputTokens * cacheReadShare) : 0;
+  const costEstimate = useMemo(
+    () => estimateAstraCost({ inputTokens: estimatedInputTokens, expectedOutputTokens, cacheReadShare, cacheWriteTokens, serviceTier }),
+    [cacheReadShare, cacheWriteTokens, estimatedInputTokens, expectedOutputTokens, serviceTier],
+  );
 
   function copyPrompt() {
     navigator.clipboard.writeText(compiledPrompt);
     toast.success("Calibrated prompt copied", { description: "The specification is ready for your target workflow." });
+  }
+
+  function downloadText(filename: string, content: string, mimeType: string) {
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
+  function exportJson() {
+    const payload = {
+      schema_version: "1.1",
+      generated_at: new Date().toISOString(),
+      model: ASTRA_PRICING.model,
+      prompt: compiledPrompt,
+      source_brief: { goal, context, requirements, output },
+      controls: {
+        complexity: mode,
+        autonomy,
+        reasoning_effort: effort,
+        tool_policy: includeTools && mode === "agent",
+        verification: includeVerification && mode !== "quick",
+        stop_condition: includeStop && mode !== "quick",
+        delegation: includeDelegation && mode === "agent",
+      },
+      cost_estimate: {
+        input_tokens: estimatedInputTokens,
+        expected_output_tokens: expectedOutputTokens,
+        cache_read_share: cacheReadShare,
+        cache_write_tokens: cacheWriteTokens,
+        service_tier: serviceTier,
+        estimated_usd_per_run: Number(costEstimate.totalCost.toFixed(6)),
+        one_time_cache_write_usd: Number(costEstimate.cacheWriteCost.toFixed(6)),
+        pricing_source: ASTRA_PRICING.sourceUrl,
+        pricing_checked: ASTRA_PRICING.effectiveDate,
+      },
+    };
+    downloadText("astra-calibrated-prompt.json", JSON.stringify(payload, null, 2), "application/json");
+    toast.success("JSON export prepared", { description: "Prompt, controls, and estimator inputs are included." });
+  }
+
+  function exportMarkdown() {
+    const markdown = `# Astra Prompt Studio Export
+
+> Generated ${new Date().toISOString()} for \`${ASTRA_PRICING.model}\`.
+
+## Calibrated Prompt
+
+\`\`\`text
+${compiledPrompt}
+\`\`\`
+
+## Calibration
+
+| Setting | Value |
+| --- | --- |
+| Complexity | ${mode} |
+| Autonomy | ${autonomy} |
+| Reasoning effort | ${effort} |
+| Tool policy | ${includeTools && mode === "agent" ? "Included" : "Not included"} |
+| Verification | ${includeVerification && mode !== "quick" ? "Included" : "Not included"} |
+| Stop condition | ${includeStop && mode !== "quick" ? "Included" : "Not included"} |
+| Delegation | ${includeDelegation && mode === "agent" ? "Included" : "Not included"} |
+
+## Cost Estimate
+
+| Input | Expected output | Cached input | Service tier | Warm cost / run | One-time cache write |
+| ---: | ---: | ---: | --- | ---: | ---: |
+| ${estimatedInputTokens.toLocaleString()} tokens | ${expectedOutputTokens.toLocaleString()} tokens | ${Math.round(cacheReadShare * 100)}% | ${serviceTier.replace("_", " ")} | ${formatUsd(costEstimate.totalCost)} | ${formatUsd(costEstimate.cacheWriteCost)} |
+
+Pricing checked ${ASTRA_PRICING.effectiveDate}. Estimate uses OpenAI's published GPT-6 Astra token rates; actual billing can differ with tool calls, image inputs, cache writes, retries, and application-specific usage. Source: ${ASTRA_PRICING.sourceUrl}
+`;
+    downloadText("astra-calibrated-prompt.md", markdown, "text/markdown");
+    toast.success("Markdown export prepared", { description: "A readable prompt specification and cost note are included." });
   }
 
   function resetDraft() {
@@ -163,6 +256,9 @@ export default function Home() {
     setIncludeVerification(true);
     setIncludeStop(true);
     setIncludeDelegation(false);
+    setExpectedOutputTokens(800);
+    setCacheReadShare(0);
+    setServiceTier("standard");
     toast.message("Reference draft restored");
   }
 
@@ -189,7 +285,7 @@ export default function Home() {
           <div className="hero-copy">
             <p className="eyebrow"><span>01</span> Prompt architecture for agentic work</p>
             <h1>Cut the scaffolding.<br /><i>Keep the signal.</i></h1>
-            <p className="hero-intro">A practical drafting desk for prompts that need to be **clear enough to execute** and **lean enough to justify**. Build only the behavioral controls your work actually needs.</p>
+            <p className="hero-intro">A practical drafting desk for prompts that need to be <strong>clear enough to execute</strong> and <strong>lean enough to justify</strong>. Build only the behavioral controls your work actually needs.</p>
             <div className="hero-stats" aria-label="Key design principles">
               <div><strong>01</strong><span>Define the outcome</span></div>
               <div><strong>02</strong><span>Constrain only real failure modes</span></div>
@@ -298,14 +394,27 @@ export default function Home() {
               <button className="icon-button" onClick={copyPrompt} aria-label="Copy calibrated prompt"><Copy size={17} /></button>
             </div>
             <div className="economy-plate">
-              <div className="economy-circle"><span>{estimatedTokens}</span><small>est. tokens</small></div>
-              <div className="economy-copy"><p>Economy forecast</p><b>{mode === "quick" ? "Deliberately lean" : activeControls <= 3 ? "Selective controls" : "Production depth"}</b><span>{overhead} words of operational overhead</span></div>
+              <div className="economy-circle economy-price"><span>{formatUsd(costEstimate.totalCost)}</span><small>est. / run</small></div>
+              <div className="economy-copy"><p>GPT-6 Astra cost forecast</p><b>{mode === "quick" ? "Deliberately lean" : activeControls <= 3 ? "Selective controls" : "Production depth"}</b><span>{estimatedInputTokens.toLocaleString()} input + {expectedOutputTokens.toLocaleString()} output tokens</span></div>
             </div>
-            <div className="signal-meter"><div className="meter-label"><span>Specification coverage</span><b>{leverage}%</b></div><div className="meter-track"><span style={{ width: `${leverage}%` }} /></div><p>{leverage > 80 ? "Critical boundaries are explicit without loading every possible rule." : "Add only the missing constraint that can change the outcome."}</p></div>
+            <div className="diagnostic-inset">
+              <div className="price-controls" aria-label="Cost-estimate assumptions">
+                <label className="price-control"><span>Expected output</span><select value={expectedOutputTokens} onChange={(event) => setExpectedOutputTokens(Number(event.target.value))}>{OUTPUT_TOKEN_OPTIONS.map((tokens) => <option value={tokens} key={tokens}>{tokens.toLocaleString()} tokens</option>)}</select></label>
+                <label className="price-control"><span>Service tier</span><select value={serviceTier} onChange={(event) => setServiceTier(event.target.value as ServiceTier)}><option value="standard">Standard</option><option value="batch_flex">Batch / Flex · 50%</option><option value="fast">Fast · 2×</option></select></label>
+                <label className="cache-control"><span>Cached input share <b>{Math.round(cacheReadShare * 100)}%</b></span><input type="range" min="0" max="75" step="25" value={cacheReadShare * 100} onChange={(event) => setCacheReadShare(Number(event.target.value) / 100)} /><small>Use only when your application reuses a matching cached prompt prefix.</small></label>
+              </div>
+              <div className="cost-breakdown"><span><i>Input</i><b>{formatUsd(costEstimate.inputCost)}</b></span><span><i>Output</i><b>{formatUsd(costEstimate.outputCost)}</b></span><span><i>100 runs</i><b>{formatUsd(costEstimate.totalCost * 100, 2)}</b></span></div>
+              <div className="cost-breakdown"><span><i>Input</i><b>{formatUsd(costEstimate.inputCost)}</b></span><span><i>Output</i><b>{formatUsd(costEstimate.outputCost)}</b></span><span><i>Cache write</i><b>{formatUsd(costEstimate.cacheWriteCost)}</b></span><span><i>100 warm runs</i><b>{formatUsd(costEstimate.totalCost * 100, 2)}</b></span></div>
+              <p className="pricing-source"><CircleDollarSign size={14} />The headline is a warm-run estimate. A cached prefix may also incur a one-time cache-write charge. Rates checked {ASTRA_PRICING.effectiveDate}. <a href={ASTRA_PRICING.sourceUrl} target="_blank" rel="noreferrer">View rates <ArrowUpRight size={11} /></a></p>
+              {costEstimate.longContextNote && <p className="long-context-note">{costEstimate.longContextNote}</p>}
+              <div className="signal-meter"><div className="meter-label"><span>Specification coverage</span><b>{leverage}%</b></div><div className="meter-track"><span style={{ width: `${leverage}%` }} /></div><p>{leverage > 80 ? "Critical boundaries are explicit without loading every possible rule." : "Add only the missing constraint that can change the outcome."}</p></div>
+            </div>
             <div className="compiled-area" key={compiledAt}>
               <pre>{compiledPrompt}</pre>
             </div>
             <button className="compile-button" onClick={compilePrompt}><Sparkles size={17} />Compile a leaner brief</button>
+            <div className="export-row"><button className="export-button" onClick={exportJson}><FileJson size={15} />Export JSON</button><button className="export-button" onClick={exportMarkdown}><FileText size={15} />Export Markdown</button></div>
+            <p className="export-note"><Download size={14} />Exports include the compiled prompt, active controls, and visible estimator assumptions.</p>
             <p className="result-footnote"><ClipboardCheck size={15} />Test this candidate against a baseline on the same representative tasks before trusting the rewrite.</p>
           </aside>
         </section>
